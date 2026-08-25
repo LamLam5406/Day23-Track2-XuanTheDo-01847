@@ -1,40 +1,43 @@
-# RTO/RPO Evidence — Lab 23 (TEMPLATE — sinh viên điền bằng SỐ CỦA MÌNH)
+# RTO/RPO Evidence - Lab 23
 
-Quy tắc duy nhất: mỗi con số ở đây phải trỏ được về **một dòng log thật**
-(`đường/dẫn.jsonl:số_dòng`). `pytest tests/test_rto_evidence.py` sẽ mở từng file ra kiểm tra.
-Con số không có evidence = trượt, bất kể các phần khác.
+All values below come from the 2026-08-25 drill timestamps.
 
-## 1. Drill 1 — không có DR (baseline)
+## 1. Drill 1 - no DR
 
-| Chỉ số | Giá trị | Cách đo | Evidence |
-|---|---|---|---|
-| t_outage | `<iso>` | chaos kill | `chaos/chaos-events.jsonl:1` |
-| Request fail đầu tiên | `+__s` | dòng `ok:false` đầu tiên sau t_outage | `reports/drill-1-nodr.jsonl:__` |
-| Request thành công sau đó | không có | không có dòng `ok:true` nào sau t_outage | `reports/measure-drill-1.json` |
-| RTO | `NO_RECOVERY` | `tools/measure_rto.py` | `reports/measure-drill-1.json` |
+| Metric | Value | Measurement | Evidence |
+|---|---:|---|---|
+| t_outage | 2026-08-25T05:07:17Z | chaos kill event | `chaos/chaos-events.jsonl:1` |
+| First failed request after outage | +2.3s | first later `ok:false` | `reports/drill-1-nodr.jsonl:8` |
+| Successful request after failure | None | no later `ok:true` | `reports/drill-1-nodr.jsonl:10` |
+| RTO | NO_RECOVERY | no success exists after the first failure | `reports/drill-1-nodr.jsonl:10` |
 
-## 2. Drill 2 — có DR
+## 2. Drill 2 - with DR
 
-| Mốc | +giây từ t_outage | Cách đo | Evidence |
-|---|---|---|---|
-| t_outage (mốc 0) | 0 | `action:kill` | `chaos/chaos-events.jsonl:__` |
-| User thấy lỗi đầu tiên | | dòng `ok:false` đầu | `reports/drill-2-withdr.jsonl:__` |
-| Health check phát hiện | | `to:UNHEALTHY, region:a` | `reports/health-events.jsonl:__` |
-| Snapshot restore xong | | `step:2_restore_snapshot` | `reports/failover-events.jsonl:__` |
-| Region phụ ready | | `step:4_wait_ready` | `reports/failover-events.jsonl:__` |
-| DNS cutover | | `step:5_dns_cutover` | `reports/failover-events.jsonl:__` |
-| **RTO đo được** | | dòng `ok:true` đầu sau lỗi | `reports/drill-2-withdr.jsonl:__` |
+| Milestone | Seconds from outage | Measurement | Evidence |
+|---|---:|---|---|
+| Outage | 0.0s | Region A kill | `chaos/chaos-events.jsonl:2` |
+| First user-visible error | 2.1s | first failed request after t_outage | `reports/drill-2-withdr.jsonl:3` |
+| Health checker detection | 15.9s | three consecutive failures at 5s interval | `reports/health-events.jsonl:2` |
+| Snapshot restored | 23.9s | `2_restore_snapshot` | `reports/failover-events.jsonl:2` |
+| Region B ready | 30.4s | `4_wait_ready`, waited 6.48s | `reports/failover-events.jsonl:4` |
+| DNS cutover | 30.4s | `5_dns_cutover` | `reports/failover-events.jsonl:5` |
+| First success from B | 32.3s | first later `ok:true`, `served_by:b` | `reports/drill-2-withdr.jsonl:15` |
 
-| Chỉ số | Đo được | Mục tiêu (slide §1) | Verdict |
-|---|---|---|---|
-| RTO — Inference API | `__s` | 300s (5 phút) | |
-| RPO — Vector DB | `__s` / `__` doc | 300s (5 phút) | |
+| Metric | Measured | Target | Verdict |
+|---|---:|---:|---|
+| RTO - Inference API | 32.3s | 300s | PASS |
+| RPO - Vector DB | 0.0s / 0 docs | 300s | PASS |
 
-## 3. RTO của tôi gồm những gì (bắt buộc — đây là phần chấm điểm hiểu bài)
+The primary and restored `latest_doc_ts` match, so this drill lost zero documents (`reports/failover-events.jsonl:2`).
 
-| Thành phần | Giây | Nó đến từ đâu | Giảm được bằng cách nào |
-|---|---|---|---|
-| Health-check detect floor | | `interval_s × threshold` trong `reports/health-events.jsonl:__` | |
-| Snapshot restore | | 2_restore → 3_scale | |
-| GPU pool warm-up | | `waited_s` ở `4_wait_ready` | |
-| DNS/LB TTL cache | | t_recovered − t_cutover | |
+## 3. RTO breakdown
+
+| Component | Seconds | Source | Reduction option |
+|---|---:|---|---|
+| Health-check detection | 15.9s | 5.0s interval and threshold 3 in `reports/health-events.jsonl:2` | carefully reduce interval while retaining anti-flap threshold |
+| Confirmation, verification, restore | 8.0s | detection through `2_restore_snapshot` | parallelize probes and consume the existing alert |
+| GPU pool warm-up | 6.5s | `waited_s:6.48` in `reports/failover-events.jsonl:4` | keep a warm or pre-warmed pool |
+| DNS cache and request cadence | 1.9s | recovery request minus cutover | lower TTL and use jittered retries |
+| **Measured total** | **32.3s** | kill through first success from B | - |
+
+The configured detection floor is 15.0s. The observed 15.9s also includes polling phase and timeout effects.

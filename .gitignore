@@ -11,6 +11,14 @@ reports/*.jsonl
 reports/*.json
 chaos/chaos-events.jsonl
 
+# Evidence bat buoc cua bai cham (phai duoc dua vao ban nop Git)
+!reports/drill-1-nodr.jsonl
+!reports/drill-2-withdr.jsonl
+!reports/health-events.jsonl
+!reports/failover-events.jsonl
+!reports/runbook-run.jsonl
+!chaos/chaos-events.jsonl
+
 # Python
 __pycache__/
 *.pyc

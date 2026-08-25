@@ -68,6 +68,11 @@ def pid_of(region: str) -> int | None:
     if not f.exists():
         return None
     pid = int(f.read_text().strip())
+    if os.name == "nt":
+        # os.kill(pid, 0) and tasklist are not reliable in restricted Windows
+        # shells.  The pid file is written by our own local launcher; the real
+        # signal below remains the source of truth if the process has exited.
+        return pid
     try:
         os.kill(pid, 0)
         return pid
@@ -96,7 +101,12 @@ def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
         # netblock: SIGSTOP -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
         #           (đúng hành vi của iptables DROP ở tầng app)
         # stop    : SIGKILL -> cổng đóng => ConnectError ngay
-        os.kill(pid, signal.SIGSTOP if mode == "netblock" else signal.SIGKILL)
+        # Windows does not expose SIGSTOP/SIGKILL.  The graded stop drill still
+        # needs to be runnable there, so SIGTERM is the portable hard-stop
+        # fallback; Linux keeps the original signal semantics.
+        stop_signal = getattr(signal, "SIGSTOP", signal.SIGTERM)
+        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+        os.kill(pid, stop_signal if mode == "netblock" else kill_signal)
     else:
         svc = f"serving-{region}"
         if mode == "stop":
@@ -111,7 +121,11 @@ def restore(region: str, backend: str):
     if backend == "bare":
         pid = pid_of(region)
         if pid:
-            os.kill(pid, signal.SIGCONT)
+            cont_signal = getattr(signal, "SIGCONT", None)
+            if cont_signal is None:
+                return event(action="restore", region=region, method="need_manual_start",
+                             note="platform has no SIGCONT; restart the serving process")
+            os.kill(pid, cont_signal)
             return event(action="restore", region=region, method="SIGCONT", pid=pid)
         return event(action="restore", region=region, method="need_manual_start",
                      note="process da bi SIGKILL, chay `make up-bare` lai")

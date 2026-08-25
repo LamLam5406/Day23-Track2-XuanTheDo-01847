@@ -33,24 +33,81 @@ import httpx
 
 sys.path.insert(0, ".")
 from dr import failover as fo  # noqa: E402
+from dr.health_checker import probe  # noqa: E402
 
 LOG = pathlib.Path("reports/runbook-run.jsonl")
 URL = {"a": "http://127.0.0.1:8001", "b": "http://127.0.0.1:8002"}
 
 
 def step(n, name, **kw):
-    """TODO: ghi 1 dòng {ts, iso, step, name, ...} vào LOG."""
-    raise NotImplementedError
+    """Append one runbook event."""
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"ts": time.time(), "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+           "step": n, "name": name, **kw}
+    with LOG.open("a", encoding="utf-8") as log:
+        log.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print("RUNBOOK", json.dumps(rec, ensure_ascii=False))
+    return rec
 
 
 def confirm(auto: bool, msg: str) -> bool:
-    """TODO: auto=True -> True; ngược lại hỏi y/N. Đừng bỏ hàm này đi."""
-    raise NotImplementedError
+    """Require an operator confirmation unless explicitly running in CI mode."""
+    return True if auto else input(f"{msg} [y/N] ").strip().lower() in {"y", "yes"}
 
 
 def run(primary: str, target: str, backend: str, auto: bool) -> dict:
-    """TODO: 7 bước ở trên."""
-    raise NotImplementedError
+    """Execute the seven-step, semi-automated incident runbook."""
+    started = time.time()
+    checks = []
+    for attempt in range(3):
+        primary_ready, primary_reason = probe(primary, 2.0)
+        target_ready, target_reason = probe(target, 2.0)
+        checks.append({"attempt": attempt + 1, "primary_ready": primary_ready,
+                       "primary_reason": primary_reason, "target_ready": target_ready,
+                       "target_reason": target_reason})
+        if primary_ready:
+            break
+        if attempt < 2:
+            time.sleep(1.0)
+    outage = len(checks) == 3 and all(not item["primary_ready"] for item in checks)
+    step(1, "xac_nhan_outage", primary=primary, target=target, confirmed=outage, checks=checks)
+    if not outage:
+        return {"ok": False, "error": "primary outage not confirmed", "checks": checks}
+    if not confirm(auto, f"Region {primary} is unavailable. Fail over to region {target}?"):
+        step(2, "thong_bao_incident", confirmed=False, action="operator_aborted")
+        return {"ok": False, "error": "operator declined failover"}
+    notified = step(2, "thong_bao_incident", confirmed=True,
+                    outage_observed_at=started, notification_delay_s=round(time.time() - started, 2))
+    result = fo.failover(target, backend, wait=60.0)
+    step(3, "scale_gpu_pool", failover_ok=result.get("ok"), waited_s=result.get("waited_s"),
+         error=result.get("error"))
+    step(4, "verify_state_replica", state=result.get("state"), restore=result.get("restore"),
+         rpo=result.get("rpo"))
+    step(5, "dns_cutover", ok=result.get("ok"), active_region=result.get("active_region"))
+    if not result.get("ok"):
+        return result
+    latencies, errors, served_by = [], 0, []
+    for i in range(10):
+        t0 = time.monotonic()
+        try:
+            response = httpx.get(f"{URL[target]}/v1/infer", params={"q": f"golden-{i}"}, timeout=3.0)
+            body = response.json()
+            latencies.append((time.monotonic() - t0) * 1000)
+            served_by.append(body.get("region"))
+            errors += int(response.status_code != 200)
+        except httpx.HTTPError:
+            latencies.append((time.monotonic() - t0) * 1000)
+            errors += 1
+    ordered = sorted(latencies)
+    p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))] if ordered else None
+    step(6, "verify_golden_signals", requests=10, error_rate=errors / 10,
+         p95_latency_ms=None if p95 is None else round(p95, 1), served_by=served_by)
+    elapsed = round(time.time() - started, 2)
+    command = "python tools/measure_rto.py --loadgen reports/drill-2-withdr.jsonl --target-rto 300"
+    step(7, "post_incident", elapsed_s=elapsed, measure_command=command,
+         incident_notified_at=notified["ts"])
+    return {**result, "elapsed_s": elapsed, "golden_error_rate": errors / 10,
+            "golden_p95_latency_ms": p95}
 
 
 if __name__ == "__main__":
